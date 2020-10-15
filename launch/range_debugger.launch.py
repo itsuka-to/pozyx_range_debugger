@@ -23,15 +23,21 @@ def generate_launch_description():
     stdout_linebuf_envvar = SetEnvironmentVariable(
     'RCUTILS_CONSOLE_STDOUT_LINE_BUFFERED', '1')
     
-    param_substitutions = {
-        'use_sim_time': use_sim_time,
-        'yaml_filename': map_dir,
-        'bt_xml_filename': bt_xml_file,
-        'autostart': autostart
-    }
-    configured_params = RewrittenYaml(
-        source_file=params_file_dir, rewrites=param_substitutions,
-        convert_types=True)
+    # param_substitutions = {
+    #     'use_sim_time': use_sim_time,
+    #     'yaml_filename': map_dir,
+    #     'bt_xml_filename': bt_xml_file,
+    #     'autostart': autostart
+    # }
+    # configured_params = RewrittenYaml(
+    #     source_file=params_file_dir, rewrites=param_substitutions,
+    #     convert_types=True)
+
+    start_range_debugger = launch_ros.actions.Node(
+        package='pozyx_range_debugger',
+        node_executable='debugger',
+        output='both',
+    )
 
     stf_map_originpos = launch_ros.actions.Node(package='tf2_ros',
                             node_executable='static_transform_publisher',
@@ -42,21 +48,16 @@ def generate_launch_description():
         package='rviz2',
         node_executable='rviz2',
         output='both',
-        arguments=['-d',os.path.join(share_dir_path, 'rviz2', 'pozyx_test.rviz') ])
+        arguments=['-d',os.path.join(share_dir_path, 'rviz2', 'range_debugger.rviz') ])
 
     ld = LaunchDescription()
 
     # Set environment variables
     ld.add_action(stdout_linebuf_envvar)
 
-    ld.add_action(declare_params_file_cmd)
-    ld.add_action(declare_map_yaml_cmd)
-    ld.add_action(declare_use_sim_time_cmd)
-    ld.add_action(declare_autostart_cmd)
-    ld.add_action(declare_bt_xml_cmd)
-
     # Add the actions to launch all of the navigation nodes
     ld.add_action(stf_map_originpos)
+    ld.add_action(start_range_debugger)
     ld.add_action(start_rviz)
 
 
