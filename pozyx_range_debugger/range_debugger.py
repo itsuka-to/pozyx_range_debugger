@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 
 from std_msgs.msg import String
+from nav_msgs.msg import Odometry
 from visualization_msgs.msg import Marker, MarkerArray
 
 from pypozyx import (PozyxSerial, PozyxConstants, Coordinates, PozyxRegisters, version, DeviceCoordinates,
@@ -16,6 +17,7 @@ class RangeDebugger(Node):
     def __init__(self):
         super().__init__("range_debugger")
         self.range_pub = self.create_publisher(String, "range", 10)
+        self.position_pub = self.create_publisher(Odometry, "odometry/pozyx", 1000)
         self.markers_pub = self.create_publisher(MarkerArray, "odometry/pozyx/markers", 10)
         # serial port setting
         serial_port = "/dev/ttyACM0"
@@ -27,8 +29,7 @@ class RangeDebugger(Node):
         self.pozyx = PozyxSerial(serial_port)
 
         # remote and destination
-        self.remote_id = None
-        self.destination_id = 0x605b
+        self.tag_ids = [None]
 
         self.ranging_protocol = PozyxConstants.RANGE_PROTOCOL_PRECISION
         self.range_timer_ = self.create_timer(
@@ -36,30 +37,120 @@ class RangeDebugger(Node):
         )
 
         self.anchors = [
-            DeviceCoordinates(0x605b, 1, Coordinates(   0, 0, 0)),  # test
-            DeviceCoordinates(0x603b, 1, Coordinates(1000, 0, 0)),  # test
+            # DeviceCoordinates(0x605b, 1, Coordinates(   0, 0, 0)),  # test
+            # DeviceCoordinates(0x603b, 1, Coordinates( 800, 0, 0)),  # test
+            DeviceCoordinates(0x6023, 1, Coordinates(-13563, -8838, 475)),  # ROOM
+            DeviceCoordinates(0x6e23, 1, Coordinates( -3327, -8849, 475)),  # ROOM
+            DeviceCoordinates(0x6e49, 1, Coordinates( -3077, -2959, 475)),  # ROOM
+            # DeviceCoordinates(0x6e58, 1, Coordinates( -7238, -3510, 475)),  # ROOM
+            DeviceCoordinates(0x6050, 1, Coordinates( -9214, -9102, 475)),  # ROOM
         ]
 
+        self.algorithm = PozyxConstants.POSITIONING_ALGORITHM_UWB_ONLY
+        self.dimension = PozyxConstants.DIMENSION_2D
+        self.height = 475
+
+        self.setup()
+
+
+    def setup(self):
+        self.setAnchorsManual()
+        for anchor in self.anchors:
+            self.get_logger().info("ANCHOR,0x%0.4x,%s" % (anchor.network_id, str(anchor.pos)))
+    
+    def setAnchorsManual(self):
+        """Adds the manually measured anchors to the Pozyx's device list one for one."""
+        for tag_id in self.tag_ids:
+            status = self.pozyx.clearDevices(tag_id)
+            for anchor in self.anchors:
+                status &= self.pozyx.addDevice(anchor, tag_id)
+            if len(self.anchors) > 4:
+                status &= self.pozyx.setSelectionOfAnchors(PozyxConstants.ANCHOR_SELECT_MANUAL, len(self.anchors),
+                                                           remote_id=tag_id)
+            self.printPublishConfigurationResult(status, tag_id)
+
+    def printPublishConfigurationResult(self, status, tag_id):
+        """Prints the configuration explicit result, prints and publishes error if one occurs"""
+        if tag_id is None:
+            tag_id = 0
+        if status == POZYX_SUCCESS:
+            self.get_logger().info("Configuration of tag %s: success" % tag_id)
+        else:
+            self.printPublishErrorCode("configuration", tag_id)
+
+
+    def printPublishErrorCode(self, operation, network_id):
+        """Prints the Pozyx's error and possibly sends it as a OSC packet"""
+        error_code = SingleRegister()
+        status = self.pozyx.getErrorCode(error_code, network_id)
+        if network_id is None:
+            network_id = 0
+        if status == POZYX_SUCCESS:
+            self.get_logger().error("Error %s on ID %s, %s" %
+                  (operation, "0x%0.4x" % network_id, self.pozyx.getErrorMessage(error_code)))
+        else:
+            # should only happen when not being able to communicate with a remote Pozyx.
+            self.pozyx.getErrorCode(error_code)
+            self.get_logger().error("Error % s, local error code %s" % (operation, str(error_code)))
 
     def range_callback(self):
-        for anchor in self.anchors:
-            self.destination_id = anchor.network_id  # Update
-
-            device_range = DeviceRange()
-            status = self.pozyx.doRanging(
-                self.destination_id, device_range, self.remote_id
-            )
-            if status == POZYX_SUCCESS:
-                self.publishMarkerArray(device_range.distance, anchor)
-                self.get_logger().info(f"{device_range.distance}")
-            else:
-                error_code = SingleRegister()
-                status = self.pozyx.getErrorCode(error_code)
+        """Do ranging periodically, and publish visualizasion_msg MarkerArray"""
+        for tag_id in self.tag_ids:
+            for anchor in self.anchors:
+                device_range = DeviceRange()
+                status = self.pozyx.doRanging(
+                    anchor.network_id, device_range, tag_id
+                )
                 if status == POZYX_SUCCESS:
-                    print("ERROR Ranging, local %s" %
-                        self.pozyx.getErrorMessage(error_code))
+                    self.publishMarkerArray(device_range.distance, anchor)
+                    # self.get_logger().info(f"{device_range.distance}")
                 else:
-                    print("ERROR Ranging, couldn't retrieve local error")
+                    error_code = SingleRegister()
+                    status = self.pozyx.getErrorCode(error_code)
+                    if status == POZYX_SUCCESS:
+                        self.get_logger().error("ERROR Ranging, local %s" %
+                            self.pozyx.getErrorMessage(error_code))
+                    else:
+                        self.get_logger().error("ERROR Ranging, couldn't retrieve local error")
+        self.doPositioning()
+
+    def doPositioning(self):
+        for tag_id in self.tag_ids:
+            position = Coordinates()
+            status = self.pozyx.doPositioning(position, self.dimension, self.height, self.algorithm, remote_id=tag_id)
+            quat = Quaternion()
+            status &= self.pozyx.getNormalizedQuaternion(quat, tag_id)
+            if status == POZYX_SUCCESS:
+                self.printPublishPosition(position, tag_id, quat)
+            else:
+                self.printPublishErrorCode("positioning", tag_id)
+    
+    def printPublishPosition(self, position, network_id, quat):
+        if network_id is None:
+            network_id = 0
+        
+        odom = Odometry()
+        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.frame_id = "pozyx"
+        odom.pose.pose.position.x = position.x * 0.001
+        odom.pose.pose.position.y = position.y * 0.001
+        if self.dimension == PozyxConstants.DIMENSION_3D:
+            odom.pose.pose.position.z = position.z * 0.001
+        else:
+            odom.pose.pose.position.z = float(self.height) / 1000
+        odom.pose.pose.orientation.x = quat.x
+        odom.pose.pose.orientation.y = quat.y
+        odom.pose.pose.orientation.z = quat.z
+        odom.pose.pose.orientation.w = quat.w
+        odom.pose.covariance = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0,\
+            0.0, 1.0, 0.0, 0.0, 0.0, 0.0,\
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,\
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,\
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,\
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.03,
+            ]
+        self.position_pub.publish(odom)
     
 
     def publishMarkerArray(self, distance, anchor):
@@ -71,12 +162,14 @@ class RangeDebugger(Node):
         distance : float
         """
 
-        pos_x = 0
-        pos_y = 0.0
-        pos_z = 0.0
+        is_3D_estimation = (self.dimension == PozyxConstants.DIMENSION_3D)
+
+        pos_x = anchor.pos.x
+        pos_y = anchor.pos.y
+        pos_z = anchor.pos.z
 
         markerArray = MarkerArray()
-        m_id = 0
+        m_id = anchor.network_id
         
         # marker of pozyx pos
         marker_pos = Marker()
@@ -113,12 +206,17 @@ class RangeDebugger(Node):
         marker_pos.id = m_id
         m_id += 1
         
-        marker_pos.type = Marker.SPHERE
+        if is_3D_estimation:
+            marker_pos.type = Marker.SPHERE
+            marker_pos.scale.z = float(distance) * 2 / 1000
+        else:
+            marker_pos.type =Marker.CYLINDER
+            marker_pos.scale.z = 0.001
+        
         marker_pos.action = Marker.ADD
         marker_pos.lifetime.sec = 1
         marker_pos.scale.x = float(distance) * 2 / 1000
         marker_pos.scale.y = float(distance) * 2 / 1000
-        marker_pos.scale.z = float(distance) * 2 / 1000
         marker_pos.pose.position.x = pos_x / 1000
         marker_pos.pose.position.y = pos_y / 1000
         marker_pos.pose.position.z = pos_z / 1000
@@ -129,10 +227,10 @@ class RangeDebugger(Node):
         marker_pos.color.r = 0.0
         marker_pos.color.g = 0.5
         marker_pos.color.b = 0.5
-        marker_pos.color.a = 0.5
+        marker_pos.color.a = 0.1
         markerArray.markers.append(marker_pos)
 
-        # marker of pozyx distance label
+        # marker of pozyx label
         marker_pos = Marker()
         marker_pos.header.frame_id = "/pozyx"
         marker_pos.header.stamp = self.get_clock().now().to_msg()
@@ -145,10 +243,10 @@ class RangeDebugger(Node):
         marker_pos.lifetime.sec = 1
         marker_pos.scale.x = 1.0
         marker_pos.scale.y = 1.0
-        marker_pos.scale.z = 1.0
+        marker_pos.scale.z = 0.2
         marker_pos.pose.position.x = pos_x / 1000
         marker_pos.pose.position.y = pos_y / 1000
-        marker_pos.pose.position.z = (pos_z + float(distance)) / 1000
+        marker_pos.pose.position.z = pos_z / 1000 + 0.5
         marker_pos.pose.orientation.x = 0.0
         marker_pos.pose.orientation.y = 0.0
         marker_pos.pose.orientation.z = 0.0
@@ -157,7 +255,7 @@ class RangeDebugger(Node):
         marker_pos.color.g = 1.0
         marker_pos.color.b = 1.0
         marker_pos.color.a = 1.0
-        marker_pos.text = f"{float(distance / 1000):.2f}m"
+        marker_pos.text = f"{float(distance / 1000):.2f}\n{hex(anchor.network_id)}"
 
         markerArray.markers.append(marker_pos)
 
