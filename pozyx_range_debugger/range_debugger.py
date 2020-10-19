@@ -29,7 +29,9 @@ class RangeDebugger(Node):
         self.pozyx = PozyxSerial(serial_port)
 
         # remote and destination
-        self.tag_ids = [None]
+        # But sorry, just 1 tag is useable.
+        # "None" is setting for use USB-connected tag, "0xXX"(tag id) is to use remote tag. 
+        self.tag_ids = [None]  # TODO: To use multiple tags
 
         self.ranging_protocol = PozyxConstants.RANGE_PROTOCOL_PRECISION
         self.range_timer_ = self.create_timer(
