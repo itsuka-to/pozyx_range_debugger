@@ -9,7 +9,7 @@ from pypozyx import (PozyxSerial, PozyxConstants, Coordinates, PozyxRegisters, v
                      SingleRegister, DeviceRange, POZYX_SUCCESS, get_first_pozyx_serial_port, Quaternion)
 
 from pypozyx.tools.version_check import perform_latest_version_check
-
+import time
 
 
 class RangeDebugger(Node):
@@ -17,7 +17,7 @@ class RangeDebugger(Node):
     def __init__(self):
         super().__init__("range_debugger")
         self.range_pub = self.create_publisher(String, "range", 10)
-        self.position_pub = self.create_publisher(Odometry, "odometry/pozyx", 1000)
+        self.position_pub = self.create_publisher(Odometry, "odometry/pozyx", 10)
         self.markers_pub = self.create_publisher(MarkerArray, "odometry/pozyx/markers", 10)
         # serial port setting
         serial_port = "/dev/ttyACM0"
@@ -31,27 +31,35 @@ class RangeDebugger(Node):
         # remote and destination
         # But sorry, just 1 tag is useable.
         # "None" is setting for use USB-connected tag, "0xXX"(tag id) is to use remote tag. 
-        self.tag_ids = [None]  # TODO: To use multiple tags
+        self.tag_ids = [None] # 0x6e04]  # TODO: To use multiple tags
 
         self.ranging_protocol = PozyxConstants.RANGE_PROTOCOL_PRECISION
         self.range_timer_ = self.create_timer(
-            0.02, self.range_callback
+            0.1, self.range_callback
         )
 
         self.anchors = [
             # DeviceCoordinates(0x605b, 1, Coordinates(   0, 0, 0)),  # test
             # DeviceCoordinates(0x603b, 1, Coordinates( 800, 0, 0)),  # test
-            DeviceCoordinates(0x6023, 1, Coordinates(-13563, -8838, 475)),  # ROOM
-            DeviceCoordinates(0x6e23, 1, Coordinates( -3327, -8849, 475)),  # ROOM
-            DeviceCoordinates(0x6e49, 1, Coordinates( -3077, -2959, 475)),  # ROOM
-            # DeviceCoordinates(0x6e58, 1, Coordinates( -7238, -3510, 475)),  # ROOM
-            DeviceCoordinates(0x6050, 1, Coordinates( -9214, -9102, 475)),  # ROOM
+            # DeviceCoordinates(0x6023, 1, Coordinates(-13563, -8838, 475)),  # ROOM
+            # DeviceCoordinates(0x6e23, 1, Coordinates( -3327, -8849, 475)),  # ROOM
+            # DeviceCoordinates(0x6e49, 1, Coordinates( -3077, -2959, 475)),  # ROOM
+            ## DeviceCoordinates(0x6e58, 1, Coordinates( -7238, -3510, 475)),  # ROOM
+            # DeviceCoordinates(0x6050, 1, Coordinates( -9214, -9102, 475)),  # ROOM
+            DeviceCoordinates(0x6037, 1, Coordinates( -2199, -5889, 475)),  # COR1_C2
+            DeviceCoordinates(0x6e08, 1, Coordinates(  -239, -7321, 475)),  # COR1_C2
+            DeviceCoordinates(0x605b, 1, Coordinates( -2130,   -2630, 475)),  # COR1_C2
+            DeviceCoordinates(0x6e30, 1, Coordinates(  -178,   -4168, 475)),  # COR1_C2
+            DeviceCoordinates(0x6e7c, 1, Coordinates(   -59, -2126, 475)),  # COR2
+            DeviceCoordinates(0x6044, 1, Coordinates(-14124,   922, 475)),  # COR2 # COR3
+            DeviceCoordinates(0x6e22, 1, Coordinates(-14224,  -686, 475)),  # COR2 # COR3
         ]
 
         self.algorithm = PozyxConstants.POSITIONING_ALGORITHM_UWB_ONLY
         self.dimension = PozyxConstants.DIMENSION_2D
         self.height = 475
 
+        self.periodically_i = 0
         self.setup()
 
 
@@ -67,7 +75,8 @@ class RangeDebugger(Node):
             for anchor in self.anchors:
                 status &= self.pozyx.addDevice(anchor, tag_id)
             if len(self.anchors) > 4:
-                status &= self.pozyx.setSelectionOfAnchors(PozyxConstants.ANCHOR_SELECT_MANUAL, len(self.anchors),
+                # !!! AUTO Test from 10/19
+                status &= self.pozyx.setSelectionOfAnchors(PozyxConstants.ANCHOR_SELECT_AUTO, len(self.anchors),
                                                            remote_id=tag_id)
             self.printPublishConfigurationResult(status, tag_id)
 
@@ -97,6 +106,19 @@ class RangeDebugger(Node):
 
     def range_callback(self):
         """Do ranging periodically, and publish visualizasion_msg MarkerArray"""
+        s = time.time()
+        self.periodically_i += 1
+        if self.periodically_i % 10 == 0:
+            self.doRanging()
+        m = time.time()
+        self.doPositioning()
+        e = time.time()
+        # sr = SingleRegister(0, 1)
+        for tag_id in self.tag_ids:
+            # self.pozyx.getNumberOfAnchors(sr, remote_id=tag_id)
+            self.get_logger().info(f"doRanging: {m-s}, doPositioning: {e-m}")
+
+    def doRanging(self):
         for tag_id in self.tag_ids:
             for anchor in self.anchors:
                 device_range = DeviceRange()
@@ -114,14 +136,15 @@ class RangeDebugger(Node):
                             self.pozyx.getErrorMessage(error_code))
                     else:
                         self.get_logger().error("ERROR Ranging, couldn't retrieve local error")
-        self.doPositioning()
+       
 
     def doPositioning(self):
         for tag_id in self.tag_ids:
             position = Coordinates()
             status = self.pozyx.doPositioning(position, self.dimension, self.height, self.algorithm, remote_id=tag_id)
             quat = Quaternion()
-            status &= self.pozyx.getNormalizedQuaternion(quat, tag_id)
+            # status &= self.pozyx.getNormalizedQuaternion(quat, tag_id)
+            quat.w = 1.0
             if status == POZYX_SUCCESS:
                 self.printPublishPosition(position, tag_id, quat)
             else:
@@ -272,6 +295,8 @@ def main(args=None):
 
     range_debugger = RangeDebugger()
     rclpy.spin(range_debugger)
+    # if rclpy.ok():
+    #     range_debugger.range_callback()
 
     range_debugger.destroy_node()
     rclpy.shutdown()
